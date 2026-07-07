@@ -171,7 +171,7 @@ export default function HomePage({ onNavigate, stats, recentDocs, products = [],
           gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
           gap: '16px',
         }}>
-          {PRODUCTS.map((product, i) => (
+          {products.map((product, i) => (
             <ProductCard key={product.id} product={product} onClick={onNavigate} delay={i * 0.07} />
           ))}
         </div>
