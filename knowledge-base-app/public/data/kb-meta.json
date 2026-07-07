@@ -1,7 +1,9 @@
 {
-  "last_updated": "2026-07-07T06:35:08.158426Z",
+  "last_updated": "2026-07-07T12:37:58.815902Z",
   "source": "local-folder",
-  "document_count": 25,
-  "skipped": 9,
-  "source_folder": "C:\\Users\\40103427\\OneDrive - Anheuser-Busch InBev\\GCC 2026\\Projects\\Sustainability"
+  "document_count": 39,
+  "skipped": 12,
+  "source_folders": [
+    "C:\\Users\\40103427\\OneDrive - Anheuser-Busch InBev\\GCC 2026\\Projects\\Logistics\\Documents"
+  ]
 }

@@ -208,8 +208,15 @@ def run(folder_path: str, append: bool = False):
     all_files = collect_files(root)
     print(f"        Found {len(all_files)} files total", flush=True)
 
-    # Derive a product ID from the root folder name (e.g. "Sustainability" → "sustainability")
-    root_product = re.sub(r'[^a-z0-9]+', '-', root.name.lower()).strip('-')
+    # Derive a product ID from the root folder name.
+    # If the folder is a generic name (Documents, Files, Data…), use the parent folder instead.
+    GENERIC_FOLDERS = {"documents", "files", "data", "docs", "attachments", "shared", "general", "misc"}
+    name_candidate = root.name.lower()
+    if name_candidate in GENERIC_FOLDERS and root.parent.name:
+        product_source = root.parent.name
+    else:
+        product_source = root.name
+    root_product = re.sub(r'[^a-z0-9]+', '-', product_source.lower()).strip('-')
 
     # ── Load existing docs if appending ──────────────────────────
     existing_docs = []
