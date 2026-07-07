@@ -20,6 +20,8 @@ jobs:
     name: Fetch & Index SharePoint Documents
     runs-on: ubuntu-latest
     environment: data-refresh          # <-- approval gate lives here
+    permissions:
+      contents: write                  # required to push the updated documents.json back
 
     # Hard-stop if user didn't type YES
     if: ${{ github.event.inputs.confirm == 'YES' }}
@@ -28,7 +30,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_PAT }}  # needs write access to commit back
+          token: ${{ secrets.GH_PAT || github.token }}  # falls back to GITHUB_TOKEN if GH_PAT is not set
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -67,7 +69,7 @@ jobs:
       - name: Trigger Pages redeploy
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GH_PAT }}
+          github-token: ${{ secrets.GH_PAT || github.token }}
           script: |
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
