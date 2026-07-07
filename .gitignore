@@ -7,3 +7,5 @@ extractor/.token_cache.json
 __pycache__/
 .env
 .env.local
+
+extractor/venv/
