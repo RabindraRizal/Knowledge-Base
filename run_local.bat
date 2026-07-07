@@ -1,84 +1,81 @@
 @echo off
 REM ============================================================
-REM  AB InBev Knowledge Base — Local SharePoint Extractor
-REM  Double-click this file to fetch SharePoint content
+REM  AB InBev Knowledge Base — Local Folder Extractor
+REM
+REM  HOW TO USE:
+REM    Option A: Drag your folder onto this .bat file
+REM    Option B: Double-click and type / paste the folder path
+REM    Option C: run_local.bat "C:\path\to\your\files"
 REM ============================================================
 
 cd /d "%~dp0"
-title KB Extractor
+title KB Local Extractor
 
 echo.
 echo ============================================================
-echo   AB InBev Knowledge Base Extractor
+echo   AB InBev Knowledge Base - Local Folder Extractor
 echo ============================================================
 echo.
 
-REM Check Python
+REM ── Check Python ─────────────────────────────────────────────
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python not found. Please install Python 3.9+
-    echo         https://www.python.org/downloads/
-    pause
-    exit /b 1
+    echo [ERROR] Python not found.
+    echo         Install from: https://www.python.org/downloads/
+    pause & exit /b 1
 )
 
-REM Create venv if needed
+REM ── Create venv + install deps if needed ─────────────────────
 if not exist "extractor\venv\" (
-    echo [SETUP] Creating Python virtual environment...
+    echo [SETUP] First run - installing dependencies (30 seconds)...
     python -m venv extractor\venv
-    echo [SETUP] Installing dependencies...
     extractor\venv\Scripts\pip install -r extractor\requirements.txt -q
+    echo [SETUP] Done!
     echo.
 )
 
-REM Check if auth is configured
-if not exist "extractor\auth_config.json" (
-    echo [AUTH]  No authentication config found.
+REM ── Get folder path ───────────────────────────────────────────
+if "%~1"=="" (
+    echo Paste the path to your folder below and press Enter.
+    echo (Tip: you can also drag this .bat file onto a folder icon)
     echo.
-    echo         FIRST TIME? Run setup_auth.ps1 first:
-    echo         Right-click setup_auth.ps1 ^> "Run with PowerShell"
-    echo.
-    echo         It takes ~3 minutes and registers a dedicated Azure AD app.
-    echo         After that, this script will work with one browser sign-in.
-    echo.
-    echo         Attempting anyway with fallback client (may fail)...
-    echo.
+    set /p FOLDER_PATH="Folder path: "
+) else (
+    set FOLDER_PATH=%~1
 )
 
-REM Run the extractor — opens browser for SSO sign-in
-echo [RUN]   Starting extractor...
-echo         A browser window will open for AB InBev SSO sign-in.
+if "%FOLDER_PATH%"=="" (
+    echo [ERROR] No folder path given.
+    pause & exit /b 1
+)
+
+REM ── Run extractor ─────────────────────────────────────────────
 echo.
-extractor\venv\Scripts\python extractor\extract.py
+echo [RUN]  Reading files from:
+echo        %FOLDER_PATH%
+echo.
+extractor\venv\Scripts\python extractor\extract.py "%FOLDER_PATH%"
 
 if errorlevel 1 (
     echo.
-    echo ============================================================
-    echo   FAILED — What to do next:
-    echo ============================================================
-    echo.
-    echo   1. Right-click setup_auth.ps1
-    echo   2. Click "Run with PowerShell"
-    echo   3. Sign in with your AB InBev account
-    echo   4. Run this file again
-    echo.
-    pause
-    exit /b 1
+    echo [ERROR] Extraction failed. See the error above.
+    pause & exit /b 1
 )
 
-REM Commit and push to GitHub
+REM ── Commit + push ─────────────────────────────────────────────
 echo.
 echo ============================================================
-echo   Pushing updated data to GitHub...
+echo   Pushing to GitHub...
 echo ============================================================
-git add knowledge-base-app\public\data\
+git add knowledge-base-app\public\data\documents.json
+git add knowledge-base-app\public\data\kb-meta.json
 git diff --staged --quiet && (
-    echo [INFO]  No new files found — documents.json already up to date.
+    echo [INFO]  No changes detected - nothing to push.
 ) || (
-    git commit -m "data: refresh KB from local extractor %DATE% %TIME:~0,5%"
+    git commit -m "data: update KB from local folder [%DATE%]"
     git push
     echo.
-    echo [DONE]  Site will refresh in ~2 minutes at:
+    echo [DONE]  Site will be live in ~2 min:
     echo         https://rabindrarizal.github.io/Knowledge-Base/
 )
 

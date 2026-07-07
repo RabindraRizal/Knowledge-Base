@@ -1,16 +1,14 @@
 """
-SharePoint Knowledge Base Extractor
-------------------------------------
-Authenticates via interactive browser SSO (opens your AB InBev login page),
-reads all documents from a SharePoint document library, extracts text content,
-and writes a structured documents.json for the React knowledge base app.
+KB Local Folder Extractor
+--------------------------
+Reads ALL files from a local folder (recursively), extracts text, infers
+product / category / tags, and writes documents.json for the KB website.
 
 Usage:
-    python extract.py
-    # or double-click: run_local.ps1 / run_local.bat
+    python extract.py                        # prompts for folder
+    python extract.py "C:\\path\\to\\folder"  # pass folder directly
 
-A browser window opens for you to sign in with your AB InBev account.
-The token is cached so subsequent runs are silent (no browser needed).
+No internet connection required. No credentials needed.
 """
 
 import io
@@ -18,275 +16,66 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
+from pathlib import Path
 
-# Force UTF-8 output on Windows (avoids encoding errors)
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-import time
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
-
-import msal
-import requests
-
 # ---------------------------------------------------------------------------
-# Configuration — overridable via environment variables (used by GitHub Actions)
+# Config
 # ---------------------------------------------------------------------------
-
-SHAREPOINT_HOST = os.environ.get("SHAREPOINT_HOST", "anheuserbuschinbev.sharepoint.com")
-SITE_PATH       = os.environ.get("SITE_PATH",       "/sites/Sustinability")
-DRIVE_NAME      = os.environ.get("DRIVE_NAME",      "Shared Documents")
-
-SCOPES_DELEGATED = ["https://graph.microsoft.com/Sites.Read.All",
-                    "https://graph.microsoft.com/Files.Read.All"]
-SCOPES_APP       = ["https://graph.microsoft.com/.default"]
 
 OUTPUT_DIR  = Path(__file__).parent.parent / "knowledge-base-app" / "public" / "data"
 OUTPUT_FILE = OUTPUT_DIR / "documents.json"
 META_FILE   = OUTPUT_DIR / "kb-meta.json"
 
-EXTRACTABLE = {".docx", ".pdf", ".pptx", ".xlsx", ".txt", ".md", ".csv"}
-MEDIA_TYPES = {".mp4", ".mkv", ".avi", ".mov", ".mp3", ".wav",
-               ".m4v", ".wmv", ".webm", ".m4a"}
-
-CONFIG_PATH = Path(__file__).parent / "auth_config.json"
-CACHE_PATH  = Path(__file__).parent / ".token_cache.json"
-
-# ---------------------------------------------------------------------------
-# Auth helpers
-# ---------------------------------------------------------------------------
-
-def _load_auth_config() -> dict:
-    """Load client_id / tenant_id from auth_config.json (created by setup_auth.ps1)."""
-    if CONFIG_PATH.exists():
-        cfg = json.loads(CONFIG_PATH.read_text())
-        return cfg
-    return {}
-
-
-def _is_ci() -> bool:
-    """True when running in GitHub Actions with app credentials."""
-    return all(os.environ.get(k) for k in ("TENANT_ID", "CLIENT_ID", "CLIENT_SECRET"))
-
-
-def _get_token_client_credentials() -> str:
-    """App-only auth via client credentials (used in GitHub Actions CI)."""
-    tenant_id     = os.environ["TENANT_ID"]
-    client_id     = os.environ["CLIENT_ID"]
-    client_secret = os.environ["CLIENT_SECRET"]
-
-    app = msal.ConfidentialClientApplication(
-        client_id,
-        authority=f"https://login.microsoftonline.com/{tenant_id}",
-        client_credential=client_secret,
-    )
-    result = app.acquire_token_for_client(scopes=SCOPES_APP)
-    if "access_token" not in result:
-        raise RuntimeError(
-            f"CI auth failed: {result.get('error')} — {result.get('error_description')}"
-        )
-    print("[AUTH] App-only token acquired via client credentials.", flush=True)
-    return result["access_token"]
-
-
-def _get_token() -> str:
-    """Acquire a Graph API token — auto-selects CI vs local interactive."""
-    if _is_ci():
-        return _get_token_client_credentials()
-    return _get_token_interactive()
-
-
-def _get_token_interactive() -> str:
-    """
-    Interactive browser SSO.
-    Uses the client ID from auth_config.json (created by setup_auth.ps1).
-    Falls back to the Microsoft Office well-known client if no config found.
-    """
-    cfg       = _load_auth_config()
-    client_id = cfg.get("client_id") or os.environ.get("CLIENT_ID")
-    tenant_id = cfg.get("tenant_id") or os.environ.get("TENANT_ID") or "organizations"
-
-    if not client_id:
-        # Last resort: Microsoft Office client — may work in some tenants
-        # If it fails, run setup_auth.ps1 to register a dedicated app.
-        client_id = "d3590ed6-52b3-4102-aeff-aad2292ab01c"
-        print("[AUTH] No auth_config.json found. Using Microsoft Office client ID.", flush=True)
-        print("       If authentication fails, run: setup_auth.ps1", flush=True)
-        print("       (It takes 3 minutes and sets up a dedicated app for this KB.)\n", flush=True)
-
-    authority = f"https://login.microsoftonline.com/{tenant_id}"
-
-    cache = msal.SerializableTokenCache()
-    if CACHE_PATH.exists():
-        cache.deserialize(CACHE_PATH.read_text())
-
-    app = msal.PublicClientApplication(client_id, authority=authority, token_cache=cache)
-
-    # Try silent (cached token) first — skips browser on repeat runs
-    accounts = app.get_accounts()
-    if accounts:
-        result = app.acquire_token_silent(SCOPES_DELEGATED, account=accounts[0])
-        if result and "access_token" in result:
-            CACHE_PATH.write_text(cache.serialize())
-            print("[AUTH] Using cached token (no sign-in needed).", flush=True)
-            return result["access_token"]
-
-    # Interactive browser SSO — opens your Microsoft login page
-    print("\nOpening browser for AB InBev SSO sign-in...", flush=True)
-    print("Sign in with your AB InBev Microsoft account.\n", flush=True)
-
-    result = app.acquire_token_interactive(scopes=SCOPES_DELEGATED)
-
-    if "access_token" not in result:
-        err = result.get("error", "unknown")
-        desc = result.get("error_description", "")
-        _print_auth_help(err, desc, client_id)
-        raise RuntimeError(f"Authentication failed: {err}")
-
-    CACHE_PATH.write_text(cache.serialize())
-    print("[OK]  Signed in successfully!\n", flush=True)
-    return result["access_token"]
-
-
-def _print_auth_help(error: str, desc: str, client_id: str) -> None:
-    """Print a helpful message when auth fails, with next steps."""
-    print("\n" + "=" * 65, flush=True)
-    print("AUTHENTICATION FAILED", flush=True)
-    print("=" * 65, flush=True)
-    print(f"Error : {error}", flush=True)
-    if desc:
-        code = desc.split("AADSTS")[1].split(":")[0] if "AADSTS" in desc else ""
-        print(f"Code  : AADSTS{code}", flush=True)
-    print("=" * 65, flush=True)
-
-    if "65002" in desc or "AADSTS65002" in desc:
-        print("\n[FIX] The client app is not authorized in your tenant.", flush=True)
-        print("      Run setup_auth.ps1 to create a dedicated app (3 min):", flush=True)
-        print("      > Right-click setup_auth.ps1 -> Run with PowerShell", flush=True)
-    elif "AADSTS50020" in desc or "AADSTS50034" in desc:
-        print("\n[FIX] Account not found. Make sure you sign in with your", flush=True)
-        print("      @ab-inbev.com or @anheuser-busch.com account.", flush=True)
-    elif "conditional_access" in desc.lower() or "AADSTS53003" in desc:
-        print("\n[FIX] Conditional access policy blocking this app.", flush=True)
-        print("      Run setup_auth.ps1 to register an app in YOUR tenant:", flush=True)
-        print("      > Right-click setup_auth.ps1 -> Run with PowerShell", flush=True)
-    else:
-        print("\n[FIX] Run setup_auth.ps1 to configure authentication.", flush=True)
-    print("=" * 65 + "\n", flush=True)
-
-
-# ---------------------------------------------------------------------------
-# Graph API helpers
-# ---------------------------------------------------------------------------
-
-class GraphClient:
-    BASE = "https://graph.microsoft.com/v1.0"
-
-    def __init__(self, token: str):
-        self.session = requests.Session()
-        self.session.headers.update({"Authorization": f"Bearer {token}"})
-
-    def get(self, path: str, **kwargs) -> dict:
-        resp = self.session.get(f"{self.BASE}{path}", **kwargs)
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_bytes(self, url: str) -> bytes:
-        resp = self.session.get(url)
-        resp.raise_for_status()
-        return resp.content
-
-    def paginate(self, path: str) -> list:
-        """Collect all pages from a paged Graph API response."""
-        results = []
-        url = f"{self.BASE}{path}"
-        while url:
-            resp = self.session.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            results.extend(data.get("value", []))
-            url = data.get("@odata.nextLink")
-        return results
-
-
-# ---------------------------------------------------------------------------
-# SharePoint navigation
-# ---------------------------------------------------------------------------
-
-def get_site_id(client: GraphClient) -> str:
-    data = client.get(f"/sites/{SHAREPOINT_HOST}:{SITE_PATH}")
-    return data["id"]
-
-
-def get_drive_id(client: GraphClient, site_id: str) -> str:
-    drives = client.paginate(f"/sites/{site_id}/drives")
-    for d in drives:
-        if d["name"].lower() in (DRIVE_NAME.lower(), "documents", "shared documents"):
-            return d["id"]
-    # Fall back to default drive
-    data = client.get(f"/sites/{site_id}/drive")
-    return data["id"]
-
-
-def list_items_recursive(client: GraphClient, drive_id: str,
-                         folder_id: str = "root",
-                         folder_path: str = "") -> list:
-    """Recursively list all drive items under a folder."""
-    items = []
-    children = client.paginate(f"/drives/{drive_id}/items/{folder_id}/children")
-    for item in children:
-        item["_folderPath"] = folder_path
-        if "folder" in item:
-            sub_path = f"{folder_path}/{item['name']}".lstrip("/")
-            items += list_items_recursive(client, drive_id, item["id"], sub_path)
-        else:
-            items.append(item)
-    return items
-
+EXTRACTABLE = {".docx", ".doc", ".pdf", ".pptx", ".ppt", ".xlsx", ".xls", ".txt", ".md", ".csv"}
+MEDIA_TYPES = {".mp4", ".mkv", ".avi", ".mov", ".mp3", ".wav", ".m4v", ".wmv", ".webm", ".m4a"}
+SKIP_DIRS   = {"__pycache__", ".git", "node_modules", ".DS_Store", "venv", ".venv", "dist"}
+MAX_FILE_MB = 100  # skip files larger than this
 
 # ---------------------------------------------------------------------------
 # Text extraction
 # ---------------------------------------------------------------------------
 
-def extract_docx(content: bytes) -> str:
+def extract_docx(path: Path) -> str:
     from docx import Document
-    doc = Document(io.BytesIO(content))
+    doc = Document(str(path))
     return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 
-def extract_pdf(content: bytes) -> str:
+def extract_pdf(path: Path) -> str:
     import pdfplumber
-    text_parts = []
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
+    parts = []
+    with pdfplumber.open(str(path)) as pdf:
         for page in pdf.pages:
             t = page.extract_text()
             if t:
-                text_parts.append(t)
-    return "\n".join(text_parts)
+                parts.append(t)
+    return "\n".join(parts)
 
 
-def extract_pptx(content: bytes) -> str:
+def extract_pptx(path: Path) -> str:
     from pptx import Presentation
-    prs = Presentation(io.BytesIO(content))
+    prs = Presentation(str(path))
     parts = []
-    for slide_num, slide in enumerate(prs.slides, 1):
-        slide_texts = []
+    for i, slide in enumerate(prs.slides, 1):
+        texts = []
         for shape in slide.shapes:
             if shape.has_text_frame:
                 for para in shape.text_frame.paragraphs:
                     t = "".join(r.text for r in para.runs).strip()
                     if t:
-                        slide_texts.append(t)
-        if slide_texts:
-            parts.append(f"[Slide {slide_num}]\n" + "\n".join(slide_texts))
+                        texts.append(t)
+        if texts:
+            parts.append(f"[Slide {i}]\n" + "\n".join(texts))
     return "\n\n".join(parts)
 
 
-def extract_xlsx(content: bytes) -> str:
+def extract_xlsx(path: Path) -> str:
     import openpyxl
-    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     parts = []
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -296,207 +85,218 @@ def extract_xlsx(content: bytes) -> str:
             if row_str.strip():
                 rows.append(row_str)
         if rows:
-            parts.append(f"[Sheet: {sheet_name}]\n" + "\n".join(rows[:200]))
+            parts.append(f"[Sheet: {sheet_name}]\n" + "\n".join(rows[:500]))
     return "\n\n".join(parts)
 
 
-def extract_text(content: bytes, extension: str) -> str:
+def extract_text_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")[:50_000]
+
+
+def extract(path: Path) -> str:
+    ext = path.suffix.lower()
     try:
-        if extension == ".docx":
-            return extract_docx(content)
-        elif extension == ".pdf":
-            return extract_pdf(content)
-        elif extension == ".pptx":
-            return extract_pptx(content)
-        elif extension == ".xlsx":
-            return extract_xlsx(content)
-        elif extension in (".txt", ".md", ".csv"):
-            return content.decode("utf-8", errors="replace")
-    except Exception as exc:
-        return f"[Could not extract text: {exc}]"
+        if ext in (".docx", ".doc"):  return extract_docx(path)
+        if ext == ".pdf":             return extract_pdf(path)
+        if ext in (".pptx", ".ppt"): return extract_pptx(path)
+        if ext in (".xlsx", ".xls"): return extract_xlsx(path)
+        if ext in (".txt", ".md", ".csv"): return extract_text_file(path)
+    except Exception as e:
+        return f"[Extraction error: {e}]"
     return ""
 
-
 # ---------------------------------------------------------------------------
-# Category / tag inference
+# Inference: product, category, tags
 # ---------------------------------------------------------------------------
 
-CATEGORY_RULES = [
-    (r"\.(mp4|mkv|avi|mov|webm|m4v)$", "Recordings"),
-    (r"\.pptx?$", "Presentations"),
-    (r"brd|business[\s_-]?requirement", "BRD"),
-    (r"sow|statement[\s_-]?of[\s_-]?work", "SOW"),
-    (r"meeting|minutes|mom", "Meeting Notes"),
-    (r"report|dashboard", "Reports"),
-    (r"template", "Templates"),
-    (r"training|onboarding|guide|manual|tutorial", "Training"),
-    (r"architecture|design|diagram|flow", "Architecture"),
-    (r"\.xlsx?$", "Spreadsheets"),
-    (r"\.pdf$", "Documents"),
-    (r"\.docx?$", "Documents"),
-]
-
-# Maps file/folder names + content keywords → product IDs in the KB
 PRODUCT_RULES = [
-    ("circular-plan",     r"circular|retpack|ret[\s_-]?pack|capex.*pack|pack.*capex"),
+    ("circular-plan",     r"circular|retpack|ret[\s_-]?pack|capex.*pack"),
     ("demand-cockpit",    r"demand[\s_-]?cockpit|demand[\s_-]?planning[\s_-]?cockpit"),
     ("material-planning", r"material[\s_-]?planning|e2e[\s_-]?material|\bmrp\b|on[\s_-]?time[\s_-]?suggest"),
-    ("o9-adoption",       r"o9[\s_-]?adoption|touchless[\s_-]?plan|user[\s_-]?adoption|churn.*o9"),
-    ("core-design",       r"core[\s_-]?design|core[\s_-]?process|as[\s_-]?is|process[\s_-]?map|catalogue"),
-    ("o2d",               r"o2d|order[\s_-]?to[\s_-]?deliver|order[\s_-]?management|\bsto\b|\bstr\b|transport[\s_-]?schedul"),
+    ("o9-adoption",       r"o9[\s_-]?adoption|touchless[\s_-]?plan|user[\s_-]?adoption"),
+    ("core-design",       r"core[\s_-]?design|core[\s_-]?process|as[\s_-]?is|process[\s_-]?map"),
+    ("o2d",               r"o2d|order[\s_-]?to[\s_-]?deliver|order[\s_-]?management|\bsto\b|\bstr\b"),
 ]
 
-def infer_product(name: str, folder_path: str, snippet: str = "") -> Optional[str]:
-    combined = f"{folder_path}/{name} {snippet[:300]}".lower()
-    for product_id, pattern in PRODUCT_RULES:
+CATEGORY_RULES = [
+    (r"\.(mp4|mkv|avi|mov|webm|m4v)$",    "Recordings"),
+    (r"\.pptx?$",                           "Presentations"),
+    (r"brd|business[\s_-]?requirement",     "BRD"),
+    (r"sow|statement[\s_-]?of[\s_-]?work", "SOW"),
+    (r"meeting|minutes|\bmom\b",            "Meeting Notes"),
+    (r"report|dashboard",                   "Reports"),
+    (r"training|onboarding|guide|tutorial", "Training"),
+    (r"architecture|design|diagram",        "Architecture"),
+    (r"\.xlsx?$",                           "Spreadsheets"),
+    (r"\.pdf$",                             "Documents"),
+    (r"\.docx?$",                           "Documents"),
+]
+
+TAG_KEYWORDS = {
+    "ai":             ["artificial intelligence", "machine learning", "llm", "copilot", " ai "],
+    "sustainability": ["sustain", "esg", "environment", "retpack", "circular"],
+    "gcc":            ["gcc", "global capability", "command centre"],
+    "data":           ["data", "analytics", "dashboard", "kpi", "metric"],
+    "process":        ["process", "workflow", "sop", "procedure"],
+    "finance":        ["budget", "cost", "finance", "revenue", "capex"],
+    "planning":       ["planning", "forecast", "demand", "supply", "mrp"],
+    "o9":             ["o9", "one planning", "oneplanning"],
+}
+
+def infer_product(name: str, rel_path: str, snippet: str = "") -> str | None:
+    combined = f"{rel_path}/{name} {snippet[:300]}".lower()
+    for pid, pattern in PRODUCT_RULES:
         if re.search(pattern, combined, re.IGNORECASE):
-            return product_id
+            return pid
     return None
 
-def infer_category(name: str, folder_path: str) -> str:
-    combined = f"{folder_path}/{name}".lower()
-    for pattern, category in CATEGORY_RULES:
+def infer_category(name: str, rel_path: str) -> str:
+    combined = f"{rel_path}/{name}".lower()
+    for pattern, cat in CATEGORY_RULES:
         if re.search(pattern, combined, re.IGNORECASE):
-            return category
+            return cat
     return "General"
 
-
-def infer_tags(name: str, folder_path: str, text_snippet: str) -> list[str]:
-    tags = set()
-    combined = f"{folder_path}/{name} {text_snippet[:500]}".lower()
-    tag_map = {
-        "ai":             ["artificial intelligence", "machine learning", "llm", "copilot"],
-        "sustainability": ["sustain", "esg", "environment", "retpack", "circular"],
-        "gcc":            ["gcc", "global capability", "command centre"],
-        "data":           ["data", "analytics", "dashboard", "kpi", "metric"],
-        "process":        ["process", "workflow", "sop", "procedure", "as-is"],
-        "finance":        ["budget", "cost", "finance", "revenue", "capex"],
-        "planning":       ["planning", "forecast", "demand", "supply", "mrp"],
-        "o9":             ["o9", "one planning", "oneplanning"],
-        "project":        ["project", "milestone", "timeline", "roadmap"],
-    }
-    for tag, keywords in tag_map.items():
-        if any(kw in combined for kw in keywords):
-            tags.add(tag)
-    return sorted(tags)
-
-
-# ---------------------------------------------------------------------------
-# Main extraction pipeline
-# ---------------------------------------------------------------------------
+def infer_tags(name: str, rel_path: str, snippet: str = "") -> list[str]:
+    text = f"{rel_path}/{name} {snippet[:400]}".lower()
+    return sorted(tag for tag, kws in TAG_KEYWORDS.items() if any(k in text for k in kws))
 
 def file_icon(ext: str) -> str:
-    icons = {
-        ".pdf": "📄", ".docx": "📝", ".doc": "📝",
-        ".pptx": "📊", ".ppt": "📊", ".xlsx": "📈", ".xls": "📈",
-        ".mp4": "🎥", ".mkv": "🎥", ".avi": "🎥", ".mov": "🎥",
-        ".mp3": "🎵", ".wav": "🎵", ".m4a": "🎵",
+    return {
+        ".pdf": "📄", ".docx": "📝", ".doc": "📝", ".pptx": "📊", ".ppt": "📊",
+        ".xlsx": "📈", ".xls": "📈", ".mp4": "🎥", ".mkv": "🎥", ".avi": "🎥",
+        ".mov": "🎥", ".mp3": "🎵", ".wav": "🎵", ".m4a": "🎵",
         ".txt": "📃", ".md": "📃", ".csv": "📋",
-        ".zip": "📦", ".rar": "📦",
-    }
-    return icons.get(ext.lower(), "📁")
+    }.get(ext.lower(), "📁")
+
+def fmt_size(b: int) -> str:
+    for u in ("B", "KB", "MB", "GB"):
+        if b < 1024: return f"{b:.1f} {u}"
+        b /= 1024
+    return f"{b:.1f} TB"
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def collect_files(root: Path) -> list[Path]:
+    """Recursively collect all files, skipping hidden/system dirs."""
+    files = []
+    for item in sorted(root.rglob("*")):
+        if item.is_file():
+            # Skip if any parent dir is in SKIP_DIRS or starts with .
+            if any(p.name in SKIP_DIRS or p.name.startswith(".") for p in item.parents):
+                continue
+            if item.name.startswith("~$"):  # Office temp files
+                continue
+            files.append(item)
+    return files
 
 
-def run():
-    print("[AUTH]  Acquiring Microsoft Graph token...", flush=True)
-    token = _get_token()
-    client = GraphClient(token)
+def run(folder_path: str):
+    root = Path(folder_path).resolve()
+    if not root.exists():
+        print(f"[ERROR] Folder not found: {root}", flush=True)
+        sys.exit(1)
+    if not root.is_dir():
+        print(f"[ERROR] Not a folder: {root}", flush=True)
+        sys.exit(1)
 
-    print("[SITE]  Locating SharePoint site...", flush=True)
-    site_id = get_site_id(client)
-    print(f"    Site ID: {site_id}", flush=True)
-
-    print("[DRIVE] Locating document library...", flush=True)
-    drive_id = get_drive_id(client, site_id)
-    print(f"    Drive ID: {drive_id}", flush=True)
-
-    print("[LIST]  Listing all files (this may take a moment)...", flush=True)
-    raw_items = list_items_recursive(client, drive_id)
-    print(f"    Found {len(raw_items)} files", flush=True)
+    print(f"\n[SCAN]  Reading from: {root}", flush=True)
+    all_files = collect_files(root)
+    print(f"        Found {len(all_files)} files total", flush=True)
 
     documents = []
-    total = len(raw_items)
+    skipped   = 0
 
-    for idx, item in enumerate(raw_items, 1):
-        name = item.get("name", "")
-        ext = Path(name).suffix.lower()
-        size = item.get("size", 0)
-        folder_path = item.get("_folderPath", "")
-        modified = item.get("lastModifiedDateTime", "")
-        created = item.get("createdDateTime", "")
-        web_url = item.get("webUrl", "")
-        author = (item.get("createdBy", {}).get("user", {}).get("displayName")
-                  or item.get("lastModifiedBy", {}).get("user", {}).get("displayName")
-                  or "Unknown")
-
-        print(f"  [{idx}/{total}] {name}", end="", flush=True)
-
-        text_content = ""
+    for idx, path in enumerate(all_files, 1):
+        ext      = path.suffix.lower()
+        rel_path = str(path.relative_to(root).parent).replace("\\", "/")
+        size     = path.stat().st_size
         is_media = ext in MEDIA_TYPES
+        modified = datetime.fromtimestamp(path.stat().st_mtime).isoformat() + "Z"
 
-        if not is_media and ext in EXTRACTABLE and size < 50 * 1024 * 1024:  # skip >50MB
-            try:
-                download_url = item.get("@microsoft.graph.downloadUrl") or \
-                               item.get("microsoft.graph.downloadUrl")
-                if not download_url:
-                    # Fetch fresh item with download URL
-                    fresh = client.get(f"/drives/{drive_id}/items/{item['id']}")
-                    download_url = fresh.get("@microsoft.graph.downloadUrl")
+        # Size check
+        if size > MAX_FILE_MB * 1024 * 1024 and not is_media:
+            print(f"  [{idx}/{len(all_files)}] SKIP (>{MAX_FILE_MB}MB) {path.name}", flush=True)
+            skipped += 1
+            continue
 
-                if download_url:
-                    content = client.get_bytes(download_url)
-                    text_content = extract_text(content, ext)
-                    print(f" [OK] ({len(text_content)} chars)", flush=True)
-                else:
-                    print(" [WARN] no download URL", flush=True)
-            except Exception as exc:
-                print(f" [ERR] {exc}", flush=True)
-        elif is_media:
-            print(" [MEDIA] skipped extraction", flush=True)
+        # Skip non-extractable, non-media files
+        if ext not in EXTRACTABLE and not is_media:
+            skipped += 1
+            continue
+
+        print(f"  [{idx}/{len(all_files)}] {path.name}", end="  ", flush=True)
+
+        content = ""
+        if not is_media and ext in EXTRACTABLE:
+            content = extract(path)
+            print(f"[{len(content):,} chars]", flush=True)
         else:
-            print(" [SKIP]", flush=True)
+            print("[media]", flush=True)
 
-        snippet = " ".join(text_content.split()[:80]) if text_content else ""
+        snippet = " ".join(content.split()[:80])
 
         documents.append({
-            "id": item["id"],
-            "name": name,
-            "extension": ext,
-            "icon": file_icon(ext),
-            "size": size,
-            "sizeLabel": _format_size(size),
-            "folderPath": folder_path,
-            "category": infer_category(name, folder_path),
-            "productId": infer_product(name, folder_path, snippet),
-            "tags": infer_tags(name, folder_path, snippet),
-            "author": author,
-            "modified": modified,
-            "created": created,
-            "webUrl": web_url,
-            "isMedia": is_media,
-            "snippet": snippet,
-            "content": text_content,
+            "id":         f"local-{idx:05d}",
+            "name":       path.name,
+            "extension":  ext,
+            "icon":       file_icon(ext),
+            "size":       size,
+            "sizeLabel":  fmt_size(size),
+            "folderPath": rel_path or "Root",
+            "category":   infer_category(path.name, rel_path),
+            "productId":  infer_product(path.name, rel_path, snippet),
+            "tags":       infer_tags(path.name, rel_path, snippet),
+            "author":     "",
+            "modified":   modified,
+            "created":    modified,
+            "webUrl":     "#",
+            "isMedia":    is_media,
+            "snippet":    snippet,
+            "content":    content,
         })
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "generated":      datetime.utcnow().isoformat() + "Z",
+        "source":         "local-folder",
+        "sourceFolder":   str(root),
+        "totalDocuments": len(documents),
+        "skipped":        skipped,
+        "documents":      documents,
+    }
+
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "generated": datetime.utcnow().isoformat() + "Z",
-            "totalDocuments": len(documents),
-            "documents": documents,
-        }, f, ensure_ascii=False, indent=2)
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    print(f"\n[DONE]  {len(documents)} documents indexed --> {OUTPUT_FILE}", flush=True)
-    print("    Now run:  cd knowledge-base-app && npm run dev", flush=True)
+    meta = {
+        "last_updated":    datetime.utcnow().isoformat() + "Z",
+        "source":          "local-folder",
+        "document_count":  len(documents),
+        "skipped":         skipped,
+        "source_folder":   str(root),
+    }
+    with open(META_FILE, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
 
-
-def _format_size(size: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024:
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} TB"
+    print(f"\n[DONE]  {len(documents)} documents indexed  ({skipped} skipped)", flush=True)
+    print(f"        Output: {OUTPUT_FILE}", flush=True)
 
 
 if __name__ == "__main__":
-    run()
+    if len(sys.argv) > 1:
+        folder = " ".join(sys.argv[1:])
+    else:
+        print("\nAB InBev Knowledge Base — Local Folder Extractor")
+        print("-" * 50)
+        print("Drag a folder onto this window, or type the path:\n")
+        folder = input("Folder path: ").strip().strip('"').strip("'")
+
+    if not folder:
+        print("[ERROR] No folder specified.")
+        sys.exit(1)
+
+    run(folder)
