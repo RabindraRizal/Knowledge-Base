@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
-import { ArrowLeft, ExternalLink, Calendar, User, FolderOpen, Tag, FileText, Eye } from 'lucide-react'
-import { PRODUCTS } from '../data/sampleData'
+import { ArrowLeft, ExternalLink, Calendar, User, FolderOpen, Tag, FileText, Eye, Copy, Check } from 'lucide-react'
+import { useState } from 'react'
 import { MediaViewer } from './MediaViewer'
 
 function Meta({ icon: Icon, label, value }) {
@@ -13,6 +13,22 @@ function Meta({ icon: Icon, label, value }) {
         <div style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>{value}</div>
       </div>
     </div>
+  )
+}
+
+function CopyPathButton({ path }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    navigator.clipboard.writeText(path).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+  return (
+    <button onClick={copy} className="btn btn-ghost btn-sm" style={{ gap: '6px', fontSize: '0.8125rem' }}>
+      {copied ? <Check size={13} style={{ color: 'var(--forest-400)' }} /> : <Copy size={13} />}
+      {copied ? 'Copied!' : 'Copy path'}
+    </button>
   )
 }
 
@@ -29,11 +45,16 @@ const CATEGORY_BADGE = {
 
 const PREVIEWABLE = ['.mp4', '.mkv', '.avi', '.mov', '.pdf', '.pptx', '.docx', '.xlsx']
 
-export default function DocumentDetail({ doc, onBack }) {
+export default function DocumentDetail({ doc, onBack, products = [] }) {
   if (!doc) return null
 
-  const product = PRODUCTS.find((p) => p.id === doc.productId)
+  const product = products.find((p) => p.id === doc.productId)
   const hasPreview = PREVIEWABLE.includes(doc.extension)
+
+  // Build a file:// URL for local files (works when site is served locally)
+  const fileUrl = doc.localPath
+    ? 'file:///' + doc.localPath.replace(/\\/g, '/')
+    : null
 
   return (
     <motion.div
@@ -104,9 +125,10 @@ export default function DocumentDetail({ doc, onBack }) {
               </div>
             )}
 
-            {/* Open in SharePoint */}
-            {doc.webUrl && doc.webUrl !== '#' && (
-              <div style={{ marginTop: '20px' }}>
+            {/* ── Open Document buttons ── */}
+            <div style={{ marginTop: '20px', display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+              {/* SharePoint / web URL */}
+              {doc.webUrl && doc.webUrl !== '#' && (
                 <a
                   href={doc.webUrl}
                   target="_blank"
@@ -116,6 +138,33 @@ export default function DocumentDetail({ doc, onBack }) {
                 >
                   <ExternalLink size={13} /> Open in SharePoint
                 </a>
+              )}
+
+              {/* Local file link — try file:// (works in local dev; blocked on GitHub Pages) */}
+              {fileUrl && (
+                <a
+                  href={fileUrl}
+                  className="btn btn-secondary btn-sm"
+                  style={{ display: 'inline-flex', gap: '6px' }}
+                >
+                  <ExternalLink size={13} /> Open File
+                </a>
+              )}
+
+              {/* Copy path button — always shown for local files */}
+              {doc.localPath && <CopyPathButton path={doc.localPath} />}
+            </div>
+
+            {/* Local path display */}
+            {doc.localPath && (
+              <div style={{
+                marginTop: '12px', padding: '8px 12px',
+                background: 'var(--bg-elevated)', borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-subtle)',
+                fontFamily: 'monospace', fontSize: '0.75rem', color: 'var(--text-faint)',
+                wordBreak: 'break-all',
+              }}>
+                {doc.localPath}
               </div>
             )}
           </div>
@@ -159,12 +208,7 @@ export default function DocumentDetail({ doc, onBack }) {
               background: 'var(--bg-card)', border: '1px solid var(--border-subtle)',
               borderRadius: 'var(--radius-xl)', padding: '40px', textAlign: 'center', color: 'var(--text-muted)',
             }}>
-              <p style={{ fontSize: '0.875rem' }}>No extracted content available. Open in SharePoint to view.</p>
-              {doc.webUrl && doc.webUrl !== '#' && (
-                <a href={doc.webUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary" style={{ marginTop: '16px', display: 'inline-flex', gap: '6px' }}>
-                  <ExternalLink size={14} /> Open in SharePoint
-                </a>
-              )}
+              <p style={{ fontSize: '0.875rem' }}>No extracted content available for this file type.</p>
             </div>
           )}
         </div>
@@ -185,7 +229,7 @@ export default function DocumentDetail({ doc, onBack }) {
             <Meta icon={FileText} label="Format" value={doc.extension?.toUpperCase().replace('.', '')} />
             {product && (
               <div style={{ marginTop: '16px' }}>
-                <div className="section-label" style={{ marginBottom: '10px' }}>Product</div>
+                <div className="section-label" style={{ marginBottom: '10px' }}>Project</div>
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: '8px',
                   padding: '10px', background: product.colorBg,
@@ -213,4 +257,3 @@ export default function DocumentDetail({ doc, onBack }) {
     </motion.div>
   )
 }
-

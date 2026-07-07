@@ -1,6 +1,5 @@
 import { motion } from 'framer-motion'
 import { ArrowRight, FileText, Video, BarChart2, Layers, Zap, TrendingUp } from 'lucide-react'
-import { PRODUCTS } from '../data/sampleData'
 
 const RECENT_ICONS = { Presentations: BarChart2, BRD: FileText, Recordings: Video, Spreadsheets: TrendingUp }
 
@@ -101,7 +100,10 @@ function ProductCard({ product, onClick, delay }) {
   )
 }
 
-export default function HomePage({ onNavigate, stats, recentDocs }) {
+export default function HomePage({ onNavigate, stats, recentDocs, products = [], meta }) {
+  const projectName = meta?.sourceFolder
+    ? meta.sourceFolder.split(/[\\/]/).pop()
+    : 'GCC 2026 AI Planning'
   return (
     <div style={{ padding: '32px 32px 64px', maxWidth: '1200px' }}>
 
@@ -123,14 +125,13 @@ export default function HomePage({ onNavigate, stats, recentDocs }) {
           }} />
           <p className="section-label" style={{ marginBottom: '8px' }}>AB InBev · GCC 2026</p>
           <h1 style={{ margin: '0 0 10px', fontSize: 'clamp(1.75rem, 3.5vw, 2.5rem)' }}>
-            Planning Intelligence <span style={{ color: 'var(--gold-400)' }}>Knowledge Base</span>
+            {projectName} <span style={{ color: 'var(--gold-400)' }}>Knowledge Base</span>
           </h1>
           <p style={{
             color: 'var(--text-muted)', fontSize: '1.0625rem', maxWidth: '560px',
             lineHeight: 1.65, marginBottom: '28px',
           }}>
-            Centralised repository for all GCC 2026 AI planning products — documents, recordings,
-            BRDs, and strategic roadmaps for six active programmes.
+            Centralised repository for {products.length > 0 ? `${products.length} project${products.length !== 1 ? 's' : ''}` : 'all projects'} — {stats?.total ?? 0} documents including recordings, BRDs, presentations, and spreadsheets.
           </p>
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <button className="btn btn-primary" onClick={() => onNavigate('browse')}>
@@ -149,7 +150,7 @@ export default function HomePage({ onNavigate, stats, recentDocs }) {
         <StatCard value={stats?.recordings ?? '—'} label="Recordings" icon={Video} color="#FB7185" />
         <StatCard value={stats?.brds ?? '—'} label="BRDs" icon={FileText} color="#60A5FA" />
         <StatCard value={stats?.presentations ?? '—'} label="Presentations" icon={BarChart2} color="var(--gold-300)" />
-        <StatCard value={PRODUCTS.length} label="Products" icon={Zap} color="var(--forest-400)" />
+        <StatCard value={products.length} label="Projects" icon={Zap} color="var(--forest-400)" />
       </div>
 
       {/* Products grid */}

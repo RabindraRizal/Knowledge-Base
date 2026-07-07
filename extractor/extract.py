@@ -143,12 +143,13 @@ TAG_KEYWORDS = {
     "o9":             ["o9", "one planning", "oneplanning"],
 }
 
-def infer_product(name: str, rel_path: str, snippet: str = "") -> str | None:
+def infer_product(name: str, rel_path: str, snippet: str = "", default_product: str = None) -> str | None:
     combined = f"{rel_path}/{name} {snippet[:300]}".lower()
     for pid, pattern in PRODUCT_RULES:
         if re.search(pattern, combined, re.IGNORECASE):
             return pid
-    return None
+    # Fall back to the root folder name (so every file gets a product)
+    return default_product
 
 def infer_category(name: str, rel_path: str) -> str:
     combined = f"{rel_path}/{name}".lower()
@@ -206,6 +207,9 @@ def run(folder_path: str):
     all_files = collect_files(root)
     print(f"        Found {len(all_files)} files total", flush=True)
 
+    # Derive a product ID from the root folder name (e.g. "Sustainability" → "sustainability")
+    root_product = re.sub(r'[^a-z0-9]+', '-', root.name.lower()).strip('-')
+
     documents = []
     skipped   = 0
 
@@ -246,8 +250,9 @@ def run(folder_path: str):
             "size":       size,
             "sizeLabel":  fmt_size(size),
             "folderPath": rel_path or "Root",
+            "localPath":  str(path),        # full local path — used for "Open File" link
             "category":   infer_category(path.name, rel_path),
-            "productId":  infer_product(path.name, rel_path, snippet),
+            "productId":  infer_product(path.name, rel_path, snippet, root_product),
             "tags":       infer_tags(path.name, rel_path, snippet),
             "author":     "",
             "modified":   modified,

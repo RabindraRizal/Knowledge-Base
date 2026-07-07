@@ -4,7 +4,6 @@ import './App.css'
 
 import { useDocuments } from './hooks/useDocuments'
 import { useSearch } from './hooks/useSearch'
-import { PRODUCTS } from './data/sampleData'
 
 import Nav from './components/Nav'
 import Sidebar from './components/Sidebar'
@@ -22,11 +21,12 @@ export default function App() {
   const [connectOpen, setConnectOpen] = useState(false)
 
   // ── Data ───────────────────────────────────────────────────
-  const { documents: fetchedDocs, loading, source: fetchedSource, stats: fetchedStats } = useDocuments()
+  const { documents: fetchedDocs, loading, source: fetchedSource, stats: fetchedStats, products: fetchedProducts, meta } = useDocuments()
   // Allow overriding via manual file upload from ConnectPanel
   const [uploadedDocs, setUploadedDocs] = useState(null)
   const documents = uploadedDocs?.documents ?? fetchedDocs
   const source = uploadedDocs ? 'sharepoint' : fetchedSource
+  const products = fetchedProducts
   const stats = useMemo(() => ({
     total: documents.length,
     byCategory: documents.reduce((acc, d) => { acc[d.category] = (acc[d.category] || 0) + 1; return acc }, {}),
@@ -74,7 +74,7 @@ export default function App() {
     [documents]
   )
 
-  const currentProduct = PRODUCTS.find((p) => p.id === productId)
+  const currentProduct = products.find((p) => p.id === productId)
 
   if (loading) {
     return (
@@ -105,13 +105,14 @@ export default function App() {
         <Sidebar
           page={page} productId={productId} onNavigate={navigate}
           stats={stats} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)}
+          products={products}
         />
 
         <main style={{ flex: 1, minWidth: 0, overflowX: 'hidden' }}>
           <AnimatePresence mode="wait">
             {page === 'home' && (
               <motion.div key="home" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                <HomePage onNavigate={navigate} stats={stats} recentDocs={recentDocs} />
+                <HomePage onNavigate={navigate} stats={stats} recentDocs={recentDocs} products={products} meta={meta} />
               </motion.div>
             )}
             {(page === 'browse' || page === 'product') && (
@@ -128,7 +129,7 @@ export default function App() {
             )}
             {page === 'document' && selectedDoc && (
               <motion.div key={`doc-${selectedDoc.id}`} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                <DocumentDetail doc={selectedDoc} onBack={handleBack} />
+                <DocumentDetail doc={selectedDoc} onBack={handleBack} products={products} />
               </motion.div>
             )}
           </AnimatePresence>

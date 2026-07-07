@@ -1,5 +1,4 @@
 import { Home, Layers, FileText, Video, BarChart2, FolderOpen, ChevronRight, X } from 'lucide-react'
-import { PRODUCTS, CATEGORIES } from '../data/sampleData'
 
 const NAV_ITEMS = [
   { id: 'home', label: 'Home', icon: Home },
@@ -19,7 +18,7 @@ function CategoryDot({ count }) {
   )
 }
 
-export default function Sidebar({ page, productId, onNavigate, stats, isOpen, onClose }) {
+export default function Sidebar({ page, productId, onNavigate, stats, isOpen, onClose, products = [] }) {
   const catCounts = stats?.byCategory || {}
 
   return (
@@ -88,10 +87,12 @@ export default function Sidebar({ page, productId, onNavigate, stats, isOpen, on
             ))}
           </div>
 
-          {/* Products */}
+          {/* Products — dynamic from indexed docs */}
           <div>
-            <p className="section-label" style={{ marginBottom: '10px', paddingLeft: '10px' }}>Products</p>
-            {PRODUCTS.map((product) => {
+            <p className="section-label" style={{ marginBottom: '10px', paddingLeft: '10px' }}>
+              {products.length > 0 ? 'Projects / Products' : 'Products'}
+            </p>
+            {products.map((product) => {
               const active = page === 'product' && productId === product.id
               return (
                 <button
@@ -122,24 +123,25 @@ export default function Sidebar({ page, productId, onNavigate, stats, isOpen, on
             })}
           </div>
 
-          {/* Categories */}
-          <div>
-            <p className="section-label" style={{ marginBottom: '10px', paddingLeft: '10px' }}>Categories</p>
-            {CATEGORIES.slice(1).map(({ id, label, icon }) => (
-              <div key={id} style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '5px 10px', borderRadius: 'var(--radius-sm)',
-              }}>
-                <span style={{
-                  fontFamily: 'var(--font-body)', fontSize: '0.8125rem',
-                  color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px',
-                }}>
-                  <span style={{ fontSize: '12px' }}>{icon}</span>{label}
-                </span>
-                {catCounts[id] && <CategoryDot count={catCounts[id]} />}
-              </div>
-            ))}
-          </div>
+          {/* Categories — dynamic from indexed docs */}
+          {Object.keys(catCounts).length > 0 && (
+            <div>
+              <p className="section-label" style={{ marginBottom: '10px', paddingLeft: '10px' }}>Categories</p>
+              {Object.entries(catCounts)
+                .sort((a, b) => b[1] - a[1])
+                .map(([cat, count]) => (
+                  <div key={cat} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '5px 10px', borderRadius: 'var(--radius-sm)',
+                  }}>
+                    <span style={{ fontFamily: 'var(--font-body)', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+                      {cat}
+                    </span>
+                    <CategoryDot count={count} />
+                  </div>
+                ))}
+            </div>
+          )}
 
         </div>
       </aside>
