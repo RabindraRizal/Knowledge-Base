@@ -1,0 +1,9 @@
+node_modules/
+dist/
+knowledge-base-app/dist/
+knowledge-base-app/node_modules/
+extractor/.token_cache.json
+*.pyc
+__pycache__/
+.env
+.env.local
