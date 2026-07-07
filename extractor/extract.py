@@ -39,13 +39,9 @@ SHAREPOINT_HOST = os.environ.get("SHAREPOINT_HOST", "anheuserbuschinbev.sharepoi
 SITE_PATH       = os.environ.get("SITE_PATH",       "/sites/Sustinability")
 DRIVE_NAME      = os.environ.get("DRIVE_NAME",      "Shared Documents")
 
-# Azure AD public client — interactive browser SSO (no app registration needed)
-# Uses Microsoft's well-known SharePoint Online Management Shell client ID
-_PUBLIC_CLIENT_ID = "9bc3ab49-b65d-410a-85ad-de819febfddc"
-AUTHORITY         = "https://login.microsoftonline.com/organizations"
-SCOPES_DELEGATED  = ["https://graph.microsoft.com/Sites.Read.All",
-                      "https://graph.microsoft.com/Files.Read.All"]
-SCOPES_APP        = ["https://graph.microsoft.com/.default"]
+SCOPES_DELEGATED = ["https://graph.microsoft.com/Sites.Read.All",
+                    "https://graph.microsoft.com/Files.Read.All"]
+SCOPES_APP       = ["https://graph.microsoft.com/.default"]
 
 OUTPUT_DIR  = Path(__file__).parent.parent / "knowledge-base-app" / "public" / "data"
 OUTPUT_FILE = OUTPUT_DIR / "documents.json"
@@ -55,9 +51,20 @@ EXTRACTABLE = {".docx", ".pdf", ".pptx", ".xlsx", ".txt", ".md", ".csv"}
 MEDIA_TYPES = {".mp4", ".mkv", ".avi", ".mov", ".mp3", ".wav",
                ".m4v", ".wmv", ".webm", ".m4a"}
 
+CONFIG_PATH = Path(__file__).parent / "auth_config.json"
+CACHE_PATH  = Path(__file__).parent / ".token_cache.json"
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
+
+def _load_auth_config() -> dict:
+    """Load client_id / tenant_id from auth_config.json (created by setup_auth.ps1)."""
+    if CONFIG_PATH.exists():
+        cfg = json.loads(CONFIG_PATH.read_text())
+        return cfg
+    return {}
+
 
 def _is_ci() -> bool:
     """True when running in GitHub Actions with app credentials."""
@@ -85,56 +92,89 @@ def _get_token_client_credentials() -> str:
 
 
 def _get_token() -> str:
-    """Acquire a Graph API token — auto-selects CI vs interactive."""
+    """Acquire a Graph API token — auto-selects CI vs local interactive."""
     if _is_ci():
         return _get_token_client_credentials()
     return _get_token_interactive()
 
 
 def _get_token_interactive() -> str:
-    """Interactive browser SSO — opens your AB InBev login page in the browser."""
-    cache = msal.SerializableTokenCache()
-    cache_path = Path(__file__).parent / ".token_cache.json"
-    if cache_path.exists():
-        cache.deserialize(cache_path.read_text())
+    """
+    Interactive browser SSO.
+    Uses the client ID from auth_config.json (created by setup_auth.ps1).
+    Falls back to the Microsoft Office well-known client if no config found.
+    """
+    cfg       = _load_auth_config()
+    client_id = cfg.get("client_id") or os.environ.get("CLIENT_ID")
+    tenant_id = cfg.get("tenant_id") or os.environ.get("TENANT_ID") or "organizations"
 
-    app = msal.PublicClientApplication(
-        _PUBLIC_CLIENT_ID, authority=AUTHORITY, token_cache=cache
-    )
+    if not client_id:
+        # Last resort: Microsoft Office client — may work in some tenants
+        # If it fails, run setup_auth.ps1 to register a dedicated app.
+        client_id = "d3590ed6-52b3-4102-aeff-aad2292ab01c"
+        print("[AUTH] No auth_config.json found. Using Microsoft Office client ID.", flush=True)
+        print("       If authentication fails, run: setup_auth.ps1", flush=True)
+        print("       (It takes 3 minutes and sets up a dedicated app for this KB.)\n", flush=True)
+
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+
+    cache = msal.SerializableTokenCache()
+    if CACHE_PATH.exists():
+        cache.deserialize(CACHE_PATH.read_text())
+
+    app = msal.PublicClientApplication(client_id, authority=authority, token_cache=cache)
 
     # Try silent (cached token) first — skips browser on repeat runs
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(SCOPES_DELEGATED, account=accounts[0])
         if result and "access_token" in result:
-            cache_path.write_text(cache.serialize())
+            CACHE_PATH.write_text(cache.serialize())
             print("[AUTH] Using cached token (no sign-in needed).", flush=True)
             return result["access_token"]
 
-    # Interactive browser flow — opens a real browser window for SSO sign-in
+    # Interactive browser SSO — opens your Microsoft login page
     print("\nOpening browser for AB InBev SSO sign-in...", flush=True)
-    print("If no window appears, check your taskbar.\n", flush=True)
+    print("Sign in with your AB InBev Microsoft account.\n", flush=True)
 
     result = app.acquire_token_interactive(scopes=SCOPES_DELEGATED)
 
     if "access_token" not in result:
-        # Fall back to device code if interactive not supported in this environment
-        print("[WARN] Interactive auth failed, trying device code flow...", flush=True)
-        flow = app.initiate_device_flow(scopes=SCOPES_DELEGATED)
-        if "user_code" not in flow:
-            raise RuntimeError(f"Auth failed: {flow.get('error_description')}")
-        print("\n" + "=" * 60, flush=True)
-        print("ACTION REQUIRED -- Sign in to Microsoft", flush=True)
-        print("=" * 60, flush=True)
-        print(flow["message"], flush=True)
-        print("=" * 60 + "\n", flush=True)
-        result = app.acquire_token_by_device_flow(flow)
-        if "access_token" not in result:
-            raise RuntimeError(f"Auth failed: {result.get('error_description')}")
+        err = result.get("error", "unknown")
+        desc = result.get("error_description", "")
+        _print_auth_help(err, desc, client_id)
+        raise RuntimeError(f"Authentication failed: {err}")
 
-    cache_path.write_text(cache.serialize())
-    print("[OK]  Authenticated successfully!\n", flush=True)
+    CACHE_PATH.write_text(cache.serialize())
+    print("[OK]  Signed in successfully!\n", flush=True)
     return result["access_token"]
+
+
+def _print_auth_help(error: str, desc: str, client_id: str) -> None:
+    """Print a helpful message when auth fails, with next steps."""
+    print("\n" + "=" * 65, flush=True)
+    print("AUTHENTICATION FAILED", flush=True)
+    print("=" * 65, flush=True)
+    print(f"Error : {error}", flush=True)
+    if desc:
+        code = desc.split("AADSTS")[1].split(":")[0] if "AADSTS" in desc else ""
+        print(f"Code  : AADSTS{code}", flush=True)
+    print("=" * 65, flush=True)
+
+    if "65002" in desc or "AADSTS65002" in desc:
+        print("\n[FIX] The client app is not authorized in your tenant.", flush=True)
+        print("      Run setup_auth.ps1 to create a dedicated app (3 min):", flush=True)
+        print("      > Right-click setup_auth.ps1 -> Run with PowerShell", flush=True)
+    elif "AADSTS50020" in desc or "AADSTS50034" in desc:
+        print("\n[FIX] Account not found. Make sure you sign in with your", flush=True)
+        print("      @ab-inbev.com or @anheuser-busch.com account.", flush=True)
+    elif "conditional_access" in desc.lower() or "AADSTS53003" in desc:
+        print("\n[FIX] Conditional access policy blocking this app.", flush=True)
+        print("      Run setup_auth.ps1 to register an app in YOUR tenant:", flush=True)
+        print("      > Right-click setup_auth.ps1 -> Run with PowerShell", flush=True)
+    else:
+        print("\n[FIX] Run setup_auth.ps1 to configure authentication.", flush=True)
+    print("=" * 65 + "\n", flush=True)
 
 
 # ---------------------------------------------------------------------------

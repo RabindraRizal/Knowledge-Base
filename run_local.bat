@@ -31,16 +31,37 @@ if not exist "extractor\venv\" (
     echo.
 )
 
+REM Check if auth is configured
+if not exist "extractor\auth_config.json" (
+    echo [AUTH]  No authentication config found.
+    echo.
+    echo         FIRST TIME? Run setup_auth.ps1 first:
+    echo         Right-click setup_auth.ps1 ^> "Run with PowerShell"
+    echo.
+    echo         It takes ~3 minutes and registers a dedicated Azure AD app.
+    echo         After that, this script will work with one browser sign-in.
+    echo.
+    echo         Attempting anyway with fallback client (may fail)...
+    echo.
+)
+
 REM Run the extractor — opens browser for SSO sign-in
 echo [RUN]   Starting extractor...
 echo         A browser window will open for AB InBev SSO sign-in.
-echo         Sign in with your Microsoft account, then return here.
 echo.
 extractor\venv\Scripts\python extractor\extract.py
 
 if errorlevel 1 (
     echo.
-    echo [ERROR] Extraction failed. See error above.
+    echo ============================================================
+    echo   FAILED — What to do next:
+    echo ============================================================
+    echo.
+    echo   1. Right-click setup_auth.ps1
+    echo   2. Click "Run with PowerShell"
+    echo   3. Sign in with your AB InBev account
+    echo   4. Run this file again
+    echo.
     pause
     exit /b 1
 )
