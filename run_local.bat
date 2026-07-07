@@ -6,6 +6,7 @@ REM  HOW TO USE:
 REM    Option A: Drag your folder onto this .bat file
 REM    Option B: Double-click and type / paste the folder path
 REM    Option C: run_local.bat "C:\path\to\your\files"
+REM    Option D: run_local.bat "C:\path\to\your\files" --append
 REM ============================================================
 
 cd /d "%~dp0"
@@ -36,7 +37,7 @@ if not exist "extractor\venv\" (
 
 REM ── Get folder path ───────────────────────────────────────────
 if "%~1"=="" (
-    echo Paste the path to your folder below and press Enter.
+    echo Paste the path to your project folder below and press Enter.
     echo (Tip: you can also drag this .bat file onto a folder icon)
     echo.
     set /p FOLDER_PATH="Folder path: "
@@ -49,12 +50,38 @@ if "%FOLDER_PATH%"=="" (
     pause & exit /b 1
 )
 
+REM ── Ask Replace or Append ─────────────────────────────────────
+set APPEND_FLAG=
+if "%~2"=="--append" (
+    set APPEND_FLAG=--append
+    echo [MODE]  Append mode - adding to existing KB
+    goto run_extractor
+)
+
+echo.
+echo ============================================================
+echo   How should this folder be added?
+echo.
+echo   [1] REPLACE  - Clear all existing docs and index this folder only
+echo   [2] APPEND   - Add this folder to the existing KB (multi-project)
+echo ============================================================
+echo.
+set /p MODE_CHOICE="Enter 1 or 2: "
+
+if "%MODE_CHOICE%"=="2" (
+    set APPEND_FLAG=--append
+    echo [MODE]  Append mode - adding to existing KB
+) else (
+    echo [MODE]  Replace mode - fresh index
+)
+
+:run_extractor
 REM ── Run extractor ─────────────────────────────────────────────
 echo.
 echo [RUN]  Reading files from:
 echo        %FOLDER_PATH%
 echo.
-extractor\venv\Scripts\python extractor\extract.py "%FOLDER_PATH%"
+extractor\venv\Scripts\python extractor\extract.py "%FOLDER_PATH%" %APPEND_FLAG%
 
 if errorlevel 1 (
     echo.

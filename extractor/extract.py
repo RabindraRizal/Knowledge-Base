@@ -5,8 +5,9 @@ Reads ALL files from a local folder (recursively), extracts text, infers
 product / category / tags, and writes documents.json for the KB website.
 
 Usage:
-    python extract.py                        # prompts for folder
-    python extract.py "C:\\path\\to\\folder"  # pass folder directly
+    python extract.py                              # prompts for folder
+    python extract.py "C:\\path\\to\\folder"       # replace mode (default)
+    python extract.py "C:\\path\\to\\folder" --append  # add to existing docs
 
 No internet connection required. No credentials needed.
 """
@@ -194,7 +195,7 @@ def collect_files(root: Path) -> list[Path]:
     return files
 
 
-def run(folder_path: str):
+def run(folder_path: str, append: bool = False):
     root = Path(folder_path).resolve()
     if not root.exists():
         print(f"[ERROR] Folder not found: {root}", flush=True)
@@ -209,6 +210,23 @@ def run(folder_path: str):
 
     # Derive a product ID from the root folder name (e.g. "Sustainability" → "sustainability")
     root_product = re.sub(r'[^a-z0-9]+', '-', root.name.lower()).strip('-')
+
+    # ── Load existing docs if appending ──────────────────────────
+    existing_docs = []
+    existing_folders = []
+    if append and OUTPUT_FILE.exists():
+        try:
+            with open(OUTPUT_FILE, encoding="utf-8") as f:
+                prev = json.load(f)
+            existing_docs = prev.get("documents", [])
+            existing_folders = prev.get("sourceFolders", [])
+            # Remove any docs that came from this same root folder (re-index them fresh)
+            existing_docs = [d for d in existing_docs if d.get("localPath", "").replace("\\", "/")
+                             .startswith(str(root).replace("\\", "/")) is False]
+            print(f"        Appending to {len(existing_docs)} existing docs from other folders", flush=True)
+        except Exception:
+            existing_docs = []
+            existing_folders = []
 
     documents = []
     skipped   = 0
@@ -265,13 +283,23 @@ def run(folder_path: str):
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Merge with existing docs (append mode) and assign stable IDs
+    all_docs = existing_docs + documents
+    for i, d in enumerate(all_docs, 1):
+        d["id"] = f"local-{i:05d}"
+
+    # Track all source folders that have been indexed
+    if str(root) not in existing_folders:
+        existing_folders.append(str(root))
+
     payload = {
         "generated":      datetime.utcnow().isoformat() + "Z",
         "source":         "local-folder",
         "sourceFolder":   str(root),
-        "totalDocuments": len(documents),
+        "sourceFolders":  existing_folders,
+        "totalDocuments": len(all_docs),
         "skipped":        skipped,
-        "documents":      documents,
+        "documents":      all_docs,
     }
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -280,20 +308,25 @@ def run(folder_path: str):
     meta = {
         "last_updated":    datetime.utcnow().isoformat() + "Z",
         "source":          "local-folder",
-        "document_count":  len(documents),
+        "document_count":  len(all_docs),
         "skipped":         skipped,
-        "source_folder":   str(root),
+        "source_folders":  existing_folders,
     }
     with open(META_FILE, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    print(f"\n[DONE]  {len(documents)} documents indexed  ({skipped} skipped)", flush=True)
+    print(f"\n[DONE]  {len(documents)} new docs indexed  ({skipped} skipped)", flush=True)
+    print(f"        Total in KB: {len(all_docs)} docs across {len(existing_folders)} folder(s)", flush=True)
     print(f"        Output: {OUTPUT_FILE}", flush=True)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        folder = " ".join(sys.argv[1:])
+    args = sys.argv[1:]
+    append_mode = "--append" in args
+    folder_args = [a for a in args if a != "--append"]
+
+    if folder_args:
+        folder = " ".join(folder_args)
     else:
         print("\nAB InBev Knowledge Base — Local Folder Extractor")
         print("-" * 50)
@@ -304,4 +337,4 @@ if __name__ == "__main__":
         print("[ERROR] No folder specified.")
         sys.exit(1)
 
-    run(folder)
+    run(folder, append=append_mode)
