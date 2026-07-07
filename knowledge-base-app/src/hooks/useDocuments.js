@@ -12,13 +12,18 @@ export function useDocuments() {
   const [source, setSource] = useState('sample') // 'sharepoint' | 'sample'
 
   useEffect(() => {
-    fetch('/data/documents.json')
+    // Use BASE_URL so this works both locally (/) and on GitHub Pages (/Knowledge-Base/)
+    const url = `${import.meta.env.BASE_URL}data/documents.json`
+    fetch(url)
       .then((r) => {
         if (!r.ok) throw new Error('not found')
         return r.json()
       })
       .then((data) => {
-        setDocuments(data.documents || [])
+        const docs = data.documents || []
+        // Only use live data if it actually has documents
+        if (docs.length === 0) throw new Error('empty')
+        setDocuments(docs)
         setMeta({ generated: data.generated, totalDocuments: data.totalDocuments })
         setSource('sharepoint')
       })

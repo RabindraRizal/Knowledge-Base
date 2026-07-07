@@ -1,5 +1,5 @@
 /**
- * Browser-side text extraction
+ * Browser-side text extraction with product/category/tag inference
  * DOCX → mammoth | XLSX/CSV → SheetJS | PPTX → jszip+XML | TXT/MD → native
  */
 import mammoth from 'mammoth'
@@ -14,15 +14,39 @@ const EXT_ICON = {
   '.xlsx':'📈', '.xls':'📈', '.mp4':'🎥', '.mkv':'🎥', '.mov':'🎥',
   '.mp3':'🎵', '.wav':'🎵', '.txt':'📃', '.md':'📃', '.csv':'📋',
 }
+
+// ── Product inference ──────────────────────────────────────────────────────
+// Maps to product IDs in sampleData.js PRODUCTS array
+const PRODUCT_RULES = [
+  ['circular-plan',     /circular|retpack|ret[\s_-]?pack|capex.*pack|pack.*capex/i],
+  ['demand-cockpit',    /demand[\s_-]?cockpit|demand[\s_-]?planning[\s_-]?cockpit/i],
+  ['material-planning', /material[\s_-]?planning|e2e[\s_-]?material|\bmrp\b|on[\s_-]?time[\s_-]?suggest/i],
+  ['o9-adoption',       /o9[\s_-]?adoption|touchless[\s_-]?plan|user[\s_-]?adoption|churn.*o9/i],
+  ['core-design',       /core[\s_-]?design|core[\s_-]?process|as[\s_-]?is|process[\s_-]?map|catalogue/i],
+  ['o2d',               /o2d|order[\s_-]?to[\s_-]?deliver|order[\s_-]?management|\bsto\b|\bstr\b|transport[\s_-]?schedul/i],
+]
+
+function inferProduct(name, content = '') {
+  const combined = `${name} ${content.slice(0, 400)}`
+  for (const [id, re] of PRODUCT_RULES) {
+    if (re.test(combined)) return id
+  }
+  return null
+}
+
+// ── Category inference ─────────────────────────────────────────────────────
 const CATEGORY_RULES = [
-  [/\.(mp4|mkv|avi|mov|webm)$/i,         'Recordings'],
-  [/\.pptx?$/i,                           'Presentations'],
-  [/brd|business.?requirement/i,          'BRD'],
-  [/training|onboarding|guide|tutorial/i, 'Training'],
-  [/architecture|design|diagram/i,        'Architecture'],
-  [/\.xlsx?$/i,                           'Spreadsheets'],
-  [/\.pdf$/i,                             'Documents'],
-  [/\.docx?$/i,                           'Documents'],
+  [/\.(mp4|mkv|avi|mov|webm)$/i,          'Recordings'],
+  [/\.pptx?$/i,                            'Presentations'],
+  [/brd|business[\s_-]?requirement/i,      'BRD'],
+  [/sow|statement[\s_-]?of[\s_-]?work/i,  'SOW'],
+  [/meeting|minutes|mom\b/i,               'Meeting Notes'],
+  [/report|dashboard/i,                    'Reports'],
+  [/training|onboarding|guide|tutorial/i,  'Training'],
+  [/architecture|design|diagram/i,         'Architecture'],
+  [/\.xlsx?$/i,                            'Spreadsheets'],
+  [/\.pdf$/i,                              'Documents'],
+  [/\.docx?$/i,                            'Documents'],
 ]
 
 function inferCategory(name) {
@@ -30,6 +54,25 @@ function inferCategory(name) {
     if (re.test(name)) return cat
   }
   return 'General'
+}
+
+// ── Tag inference ──────────────────────────────────────────────────────────
+const TAG_MAP = {
+  'ai':             ['artificial intelligence', 'machine learning', 'llm', 'copilot'],
+  'sustainability': ['sustain', 'esg', 'environment', 'retpack', 'circular'],
+  'gcc':            ['gcc', 'global capability', 'command centre'],
+  'data':           ['data', 'analytics', 'dashboard', 'kpi', 'metric'],
+  'process':        ['process', 'workflow', 'sop', 'procedure', 'as-is'],
+  'finance':        ['budget', 'cost', 'finance', 'revenue', 'capex'],
+  'planning':       ['planning', 'forecast', 'demand', 'supply', 'mrp'],
+  'o9':             ['o9', 'one planning', 'oneplanning'],
+}
+
+function inferTags(name, content = '') {
+  const text = `${name} ${content.slice(0, 500)}`.toLowerCase()
+  return Object.entries(TAG_MAP)
+    .filter(([, keywords]) => keywords.some(k => text.includes(k)))
+    .map(([tag]) => tag)
 }
 
 function formatSize(bytes) {
@@ -40,6 +83,8 @@ function formatSize(bytes) {
   return `${bytes.toFixed(1)} TB`
 }
 
+// ── Extraction functions ───────────────────────────────────────────────────
+
 async function extractDocx(buffer) {
   const result = await mammoth.extractRawText({ arrayBuffer: buffer })
   return result.value || ''
@@ -47,9 +92,9 @@ async function extractDocx(buffer) {
 
 async function extractXlsx(buffer) {
   const wb = XLSX.read(buffer, { type: 'array' })
-  return wb.SheetNames.map(name => {
-    const ws = wb.Sheets[name]
-    return `[Sheet: ${name}]\n` + XLSX.utils.sheet_to_csv(ws, { blankrows: false })
+  return wb.SheetNames.map(sheetName => {
+    const ws = wb.Sheets[sheetName]
+    return `[Sheet: ${sheetName}]\n` + XLSX.utils.sheet_to_csv(ws, { blankrows: false })
   }).join('\n\n').slice(0, 20000)
 }
 
@@ -57,11 +102,7 @@ async function extractPptx(buffer) {
   const zip = await JSZip.loadAsync(buffer)
   const slideFiles = Object.keys(zip.files)
     .filter(n => n.match(/^ppt\/slides\/slide\d+\.xml$/))
-    .sort((a, b) => {
-      const na = parseInt(a.match(/(\d+)/)[1])
-      const nb = parseInt(b.match(/(\d+)/)[1])
-      return na - nb
-    })
+    .sort((a, b) => parseInt(a.match(/(\d+)/)[1]) - parseInt(b.match(/(\d+)/)[1]))
 
   const parts = []
   for (const path of slideFiles) {
@@ -74,8 +115,7 @@ async function extractPptx(buffer) {
       if (t) texts.push(t)
     }
     if (texts.length) {
-      const slideNum = path.match(/(\d+)/)[1]
-      parts.push(`[Slide ${slideNum}]\n${texts.join('\n')}`)
+      parts.push(`[Slide ${path.match(/(\d+)/)[1]}]\n${texts.join('\n')}`)
     }
   }
   return parts.join('\n\n')
@@ -91,6 +131,8 @@ async function extractText(file) {
   if (ext === '.txt' || ext === '.md') return new TextDecoder().decode(buffer)
   return ''
 }
+
+// ── Main export ────────────────────────────────────────────────────────────
 
 export async function processFiles(files, onProgress) {
   const docs = []
@@ -119,7 +161,8 @@ export async function processFiles(files, onProgress) {
       sizeLabel: formatSize(file.size),
       folderPath: 'Uploaded',
       category: inferCategory(file.name),
-      tags: [],
+      productId: inferProduct(file.name, content),
+      tags: inferTags(file.name, content),
       author: 'Local Upload',
       modified: new Date(file.lastModified).toISOString(),
       created:  new Date(file.lastModified).toISOString(),

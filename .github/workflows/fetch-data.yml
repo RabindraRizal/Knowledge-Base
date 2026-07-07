@@ -104,36 +104,61 @@ jobs:
             const jsonUrl = '${{ steps.extract.outputs.json_url }}'
             const spUrl   = '${{ steps.sp_extract.outputs.sp_url }}'
 
-            let body = '## ✅ Data Update Processed\n\n'
-            body += `**Approved by:** @${{ github.actor }}\n`
-            body += `**Processed at:** ${new Date().toUTCString()}\n\n`
+            let body = ''
 
             if (jsonUrl) {
-              body += `**Source:** Uploaded documents.json\n`
+              // File was attached — processing succeeded
+              body  = '## ✅ Data Update Processed\n\n'
+              body += `**Approved by:** @${{ github.actor }}\n`
+              body += `**Processed at:** ${new Date().toUTCString()}\n\n`
+              body += '**Source:** Uploaded documents.json ✓\n\n'
+              body += '🚀 **The Knowledge Base site is rebuilding now.** Changes will be live in ~2 minutes at:\n'
+              body += 'https://rabindrarizal.github.io/Knowledge-Base/\n'
+
+              // Close the issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body
+              })
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number,
+                state: 'closed', state_reason: 'completed'
+              })
             } else if (spUrl) {
-              body += `**SharePoint URL noted:** ${spUrl}\n`
-              body += `> ⚠️ SharePoint auto-fetch is not configured. The URL has been logged. To enable automatic SharePoint fetch, follow the SETUP.md guide.\n`
+              // SharePoint URL only — need admin to run local extractor
+              body  = '## ⚠️ Manual Step Required\n\n'
+              body += `**SharePoint URL:** ${spUrl}\n\n`
+              body += `**Approved by:** @${{ github.actor }}\n\n`
+              body += '---\n\n'
+              body += '### Next step: Run the local extractor\n\n'
+              body += 'Fetching from SharePoint requires signing in with your AB InBev account.\n'
+              body += 'Run this on your local machine to fetch and publish the content:\n\n'
+              body += '**Windows:** Double-click `run_local.bat` in the repository folder\n\n'
+              body += 'Or from a terminal:\n'
+              body += '```\nextractor\\venv\\Scripts\\python extractor\\extract.py\ngit add knowledge-base-app/public/data/\ngit commit -m "data: SharePoint refresh"\ngit push\n```\n\n'
+              body += 'A browser window will open for SSO sign-in. After signing in, the extractor runs automatically and commits the data. The site will refresh within ~2 minutes.\n\n'
+              body += '> Closing this issue once extraction is complete manually.'
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body
+              })
+              // Don't auto-close — admin needs to take manual action
             } else {
-              body += '> ⚠️ No data file or SharePoint URL was found in the issue body.\n'
+              body  = '## ⚠️ No Data Found\n\n'
+              body += 'No `documents.json` file or SharePoint URL was found in this issue.\n\n'
+              body += 'To update the KB:\n'
+              body += '1. Go to the [KB site](https://rabindrarizal.github.io/Knowledge-Base/) → click the upload icon\n'
+              body += '2. Drop your files in the **Upload Files** tab\n'
+              body += '3. Click **Download documents.json**, then **Open GitHub Request Form**\n'
+              body += '4. Drag your `documents.json` into the form and submit\n'
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body
+              })
             }
-
-            body += '\n🚀 **The Knowledge Base site is rebuilding now.** Changes will be live in ~2 minutes at:\n'
-            body += 'https://rabindrarizal.github.io/Knowledge-Base/\n'
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body
-            })
-
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              state: 'closed',
-              state_reason: 'completed'
-            })
 
       - name: Job Summary
         run: |

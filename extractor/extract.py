@@ -1,15 +1,16 @@
 """
 SharePoint Knowledge Base Extractor
 ------------------------------------
-Authenticates via browser (device code flow — no app registration needed),
+Authenticates via interactive browser SSO (opens your AB InBev login page),
 reads all documents from a SharePoint document library, extracts text content,
 and writes a structured documents.json for the React knowledge base app.
 
 Usage:
     python extract.py
+    # or double-click: run_local.ps1 / run_local.bat
 
-On first run you'll be prompted to open a browser link and sign in with
-your AB InBev Microsoft account. The token is cached for future runs.
+A browser window opens for you to sign in with your AB InBev account.
+The token is cached so subsequent runs are silent (no browser needed).
 """
 
 import io
@@ -18,7 +19,7 @@ import os
 import re
 import sys
 
-# Force UTF-8 output on Windows (avoids emoji encoding errors)
+# Force UTF-8 output on Windows (avoids encoding errors)
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -38,8 +39,9 @@ SHAREPOINT_HOST = os.environ.get("SHAREPOINT_HOST", "anheuserbuschinbev.sharepoi
 SITE_PATH       = os.environ.get("SITE_PATH",       "/sites/Sustinability")
 DRIVE_NAME      = os.environ.get("DRIVE_NAME",      "Shared Documents")
 
-# Azure AD public client (device code flow — local use)
-_PUBLIC_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+# Azure AD public client — interactive browser SSO (no app registration needed)
+# Uses Microsoft's well-known SharePoint Online Management Shell client ID
+_PUBLIC_CLIENT_ID = "9bc3ab49-b65d-410a-85ad-de819febfddc"
 AUTHORITY         = "https://login.microsoftonline.com/organizations"
 SCOPES_DELEGATED  = ["https://graph.microsoft.com/Sites.Read.All",
                       "https://graph.microsoft.com/Files.Read.All"]
@@ -90,7 +92,7 @@ def _get_token() -> str:
 
 
 def _get_token_interactive() -> str:
-    """Device code flow for local development."""
+    """Interactive browser SSO — opens your AB InBev login page in the browser."""
     cache = msal.SerializableTokenCache()
     cache_path = Path(__file__).parent / ".token_cache.json"
     if cache_path.exists():
@@ -100,28 +102,35 @@ def _get_token_interactive() -> str:
         _PUBLIC_CLIENT_ID, authority=AUTHORITY, token_cache=cache
     )
 
-    # Try silent (cached) first
+    # Try silent (cached token) first — skips browser on repeat runs
     accounts = app.get_accounts()
     if accounts:
         result = app.acquire_token_silent(SCOPES_DELEGATED, account=accounts[0])
         if result and "access_token" in result:
             cache_path.write_text(cache.serialize())
+            print("[AUTH] Using cached token (no sign-in needed).", flush=True)
             return result["access_token"]
 
-    # Device code flow
-    flow = app.initiate_device_flow(scopes=SCOPES_DELEGATED)
-    if "user_code" not in flow:
-        raise RuntimeError(f"Failed to start device flow: {flow.get('error_description')}")
+    # Interactive browser flow — opens a real browser window for SSO sign-in
+    print("\nOpening browser for AB InBev SSO sign-in...", flush=True)
+    print("If no window appears, check your taskbar.\n", flush=True)
 
-    print("\n" + "=" * 60, flush=True)
-    print("ACTION REQUIRED -- Sign in to Microsoft", flush=True)
-    print("=" * 60, flush=True)
-    print(flow["message"], flush=True)
-    print("=" * 60 + "\n", flush=True)
+    result = app.acquire_token_interactive(scopes=SCOPES_DELEGATED)
 
-    result = app.acquire_token_by_device_flow(flow)
     if "access_token" not in result:
-        raise RuntimeError(f"Auth failed: {result.get('error_description')}")
+        # Fall back to device code if interactive not supported in this environment
+        print("[WARN] Interactive auth failed, trying device code flow...", flush=True)
+        flow = app.initiate_device_flow(scopes=SCOPES_DELEGATED)
+        if "user_code" not in flow:
+            raise RuntimeError(f"Auth failed: {flow.get('error_description')}")
+        print("\n" + "=" * 60, flush=True)
+        print("ACTION REQUIRED -- Sign in to Microsoft", flush=True)
+        print("=" * 60, flush=True)
+        print(flow["message"], flush=True)
+        print("=" * 60 + "\n", flush=True)
+        result = app.acquire_token_by_device_flow(flow)
+        if "access_token" not in result:
+            raise RuntimeError(f"Auth failed: {result.get('error_description')}")
 
     cache_path.write_text(cache.serialize())
     print("[OK]  Authenticated successfully!\n", flush=True)
@@ -287,6 +296,23 @@ CATEGORY_RULES = [
     (r"\.docx?$", "Documents"),
 ]
 
+# Maps file/folder names + content keywords → product IDs in the KB
+PRODUCT_RULES = [
+    ("circular-plan",     r"circular|retpack|ret[\s_-]?pack|capex.*pack|pack.*capex"),
+    ("demand-cockpit",    r"demand[\s_-]?cockpit|demand[\s_-]?planning[\s_-]?cockpit"),
+    ("material-planning", r"material[\s_-]?planning|e2e[\s_-]?material|\bmrp\b|on[\s_-]?time[\s_-]?suggest"),
+    ("o9-adoption",       r"o9[\s_-]?adoption|touchless[\s_-]?plan|user[\s_-]?adoption|churn.*o9"),
+    ("core-design",       r"core[\s_-]?design|core[\s_-]?process|as[\s_-]?is|process[\s_-]?map|catalogue"),
+    ("o2d",               r"o2d|order[\s_-]?to[\s_-]?deliver|order[\s_-]?management|\bsto\b|\bstr\b|transport[\s_-]?schedul"),
+]
+
+def infer_product(name: str, folder_path: str, snippet: str = "") -> Optional[str]:
+    combined = f"{folder_path}/{name} {snippet[:300]}".lower()
+    for product_id, pattern in PRODUCT_RULES:
+        if re.search(pattern, combined, re.IGNORECASE):
+            return product_id
+    return None
+
 def infer_category(name: str, folder_path: str) -> str:
     combined = f"{folder_path}/{name}".lower()
     for pattern, category in CATEGORY_RULES:
@@ -299,13 +325,15 @@ def infer_tags(name: str, folder_path: str, text_snippet: str) -> list[str]:
     tags = set()
     combined = f"{folder_path}/{name} {text_snippet[:500]}".lower()
     tag_map = {
-        "ai": ["ai", "artificial intelligence", "machine learning", "llm"],
-        "sustainability": ["sustain", "esg", "environment"],
-        "gcc": ["gcc", "global capability center"],
-        "data": ["data", "analytics", "dashboard", "kpi"],
-        "process": ["process", "workflow", "sop", "procedure"],
-        "finance": ["budget", "cost", "finance", "revenue"],
-        "project": ["project", "milestone", "timeline", "roadmap"],
+        "ai":             ["artificial intelligence", "machine learning", "llm", "copilot"],
+        "sustainability": ["sustain", "esg", "environment", "retpack", "circular"],
+        "gcc":            ["gcc", "global capability", "command centre"],
+        "data":           ["data", "analytics", "dashboard", "kpi", "metric"],
+        "process":        ["process", "workflow", "sop", "procedure", "as-is"],
+        "finance":        ["budget", "cost", "finance", "revenue", "capex"],
+        "planning":       ["planning", "forecast", "demand", "supply", "mrp"],
+        "o9":             ["o9", "one planning", "oneplanning"],
+        "project":        ["project", "milestone", "timeline", "roadmap"],
     }
     for tag, keywords in tag_map.items():
         if any(kw in combined for kw in keywords):
@@ -399,6 +427,7 @@ def run():
             "sizeLabel": _format_size(size),
             "folderPath": folder_path,
             "category": infer_category(name, folder_path),
+            "productId": infer_product(name, folder_path, snippet),
             "tags": infer_tags(name, folder_path, snippet),
             "author": author,
             "modified": modified,
