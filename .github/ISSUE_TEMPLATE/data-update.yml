@@ -1,0 +1,61 @@
+name: Data Update Request
+description: Submit new documents or a SharePoint link to refresh the Knowledge Base
+title: "Data Update Request - [brief description]"
+labels: ["data-update"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 📁 Knowledge Base Data Update
+        Fill in the details below. The admin will review and approve this request.
+        Once approved, the site will automatically refresh within ~2 minutes.
+
+  - type: dropdown
+    id: update_type
+    attributes:
+      label: What are you submitting?
+      options:
+        - Uploading documents (PPTX, DOCX, XLSX, PDF, etc.)
+        - SharePoint site / folder reference
+        - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What's included in this update?
+      description: Briefly describe the documents — what project area, what type of content, why it should be added.
+      placeholder: "e.g. Q2 planning decks for O9 Adoption + 3 BRD documents for Demand Cockpit"
+    validations:
+      required: true
+
+  - type: input
+    id: sharepoint_url
+    attributes:
+      label: SharePoint URL (if applicable)
+      description: Paste the SharePoint folder or file URL here
+      placeholder: "https://anheuserbuschinbev.sharepoint.com/sites/..."
+
+  - type: textarea
+    id: json_attachment
+    attributes:
+      label: "📎 Attach your documents.json here"
+      description: |
+        **Steps:**
+        1. Go to the Knowledge Base site → click the upload icon (top right)
+        2. Drop your files in the Upload tab — they'll be extracted in your browser
+        3. Click **"Download data package"** to get `documents.json`
+        4. **Drag that file into this text box** (GitHub will upload it and insert a link)
+        5. The link should look like: `https://github.com/RabindraRizal/Knowledge-Base/files/...`
+      placeholder: "Drag your documents.json file here, or paste the GitHub file link after uploading..."
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: The documents I'm sharing are project-related and appropriate for the team knowledge base
+          required: true
+        - label: I have not included any personal data, passwords, or confidential credentials
+          required: true

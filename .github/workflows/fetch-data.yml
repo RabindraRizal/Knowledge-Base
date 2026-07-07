@@ -1,86 +1,146 @@
-name: Fetch SharePoint Data
+name: Process Data Update
+
+# Triggered automatically when someone adds the "approved" label to a Data Update issue.
+# Parses the issue body to find the uploaded documents.json URL, downloads it,
+# commits it to the repo, and the Pages deploy workflow handles the rest.
 
 on:
-  workflow_dispatch:
-    inputs:
-      confirm:
-        description: 'Confirm data refresh (type YES)'
-        required: true
-        default: 'NO'
-      notes:
-        description: 'Reason for refresh (optional)'
-        required: false
+  issues:
+    types: [labeled]
 
-# ── Approval gate ──────────────────────────────────────────────────────────
-# Go to Settings → Environments → New environment → name it "data-refresh"
-# Add required reviewers there. No one can run this without approval.
+permissions:
+  contents: write
+  issues: write
 
 jobs:
-  fetch:
-    name: Fetch & Index SharePoint Documents
+  process:
+    name: Process Approved Data Update
     runs-on: ubuntu-latest
-    environment: data-refresh          # <-- approval gate lives here
-
-    # Hard-stop if user didn't type YES
-    if: ${{ github.event.inputs.confirm == 'YES' }}
+    # Only run when the "approved" label is added to a Data Update Request issue
+    if: |
+      github.event.label.name == 'approved' &&
+      contains(github.event.issue.title, 'Data Update Request')
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_PAT }}  # needs write access to commit back
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: extractor/requirements.txt
-
-      - name: Install extractor dependencies
-        run: pip install -r extractor/requirements.txt
-
-      - name: Run SharePoint extractor
-        working-directory: extractor
+      - name: Extract file URL from issue body
+        id: extract
         env:
-          # Azure AD app-only credentials (add these as GitHub Secrets)
-          # See SETUP.md for how to register the Azure AD app
-          TENANT_ID:     ${{ secrets.TENANT_ID }}
-          CLIENT_ID:     ${{ secrets.CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-          # SharePoint site config (set as GitHub Variables, not Secrets)
-          SHAREPOINT_HOST: ${{ vars.SHAREPOINT_HOST || 'anheuserbuschinbev.sharepoint.com' }}
-          SITE_PATH:       ${{ vars.SITE_PATH || '/sites/Sustinability' }}
-          DRIVE_NAME:      ${{ vars.DRIVE_NAME || 'Shared Documents' }}
-        run: python extract.py
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          # Look for GitHub CDN file URLs (documents.json or any .json attachment)
+          # GitHub issue file uploads create URLs like:
+          #   https://github.com/user/repo/files/NNNNN/filename.json
+          #   https://github.com/user/repo/assets/NNNNN/uuid.json
 
-      - name: Commit updated documents.json
+          JSON_URL=$(echo "$ISSUE_BODY" | grep -oE 'https://github\.com/[^[:space:]")]+\.json' | head -1)
+
+          if [ -z "$JSON_URL" ]; then
+            # Also try Gist URLs
+            JSON_URL=$(echo "$ISSUE_BODY" | grep -oE 'https://gist\.github\.com/[^[:space:]"]+' | head -1)
+          fi
+
+          if [ -z "$JSON_URL" ]; then
+            echo "json_url=" >> $GITHUB_OUTPUT
+            echo "::warning::No JSON file URL found in issue body"
+          else
+            echo "json_url=$JSON_URL" >> $GITHUB_OUTPUT
+            echo "Found JSON URL: $JSON_URL"
+          fi
+
+      - name: Extract SharePoint URL from issue body
+        id: sp_extract
+        if: steps.extract.outputs.json_url == ''
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          SP_URL=$(echo "$ISSUE_BODY" | grep -oE 'https://[^[:space:]"]+sharepoint\.com[^[:space:]"]+' | head -1)
+          echo "sp_url=$SP_URL" >> $GITHUB_OUTPUT
+
+      - name: Download documents.json from issue attachment
+        if: steps.extract.outputs.json_url != ''
+        run: |
+          echo "Downloading from: ${{ steps.extract.outputs.json_url }}"
+          curl -L --fail \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "${{ steps.extract.outputs.json_url }}" \
+            -o knowledge-base-app/public/data/documents.json
+
+          # Validate it's valid JSON
+          python3 -c "import json,sys; data=json.load(open('knowledge-base-app/public/data/documents.json')); print(f'Valid JSON: {len(data.get(\"documents\",[]))} documents')"
+
+      - name: Update metadata
+        run: |
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          SUBMITTER="${{ github.event.issue.user.login }}"
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          DOC_COUNT=$(python3 -c "import json; d=json.load(open('knowledge-base-app/public/data/documents.json')); print(len(d.get('documents',[])))" 2>/dev/null || echo "unknown")
+
+          cat > knowledge-base-app/public/data/kb-meta.json << EOF
+          {
+            "last_updated": "$NOW",
+            "source": "user-upload",
+            "issue_number": $ISSUE_NUM,
+            "submitted_by": "$SUBMITTER",
+            "document_count": "$DOC_COUNT"
+          }
+          EOF
+
+      - name: Commit and push updated data
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add knowledge-base-app/public/data/documents.json
-          git add knowledge-base-app/public/data/kb-meta.json 2>/dev/null || true
+          git add knowledge-base-app/public/data/
           git diff --staged --quiet && echo "No changes to commit" || \
-            git commit -m "data: refresh SharePoint index $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
+            git commit -m "data: update KB from issue #${{ github.event.issue.number }} by ${{ github.event.issue.user.login }}"
           git push
 
-      - name: Trigger Pages redeploy
+      - name: Comment and close issue
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GH_PAT }}
           script: |
-            await github.rest.actions.createWorkflowDispatch({
+            const jsonUrl = '${{ steps.extract.outputs.json_url }}'
+            const spUrl   = '${{ steps.sp_extract.outputs.sp_url }}'
+
+            let body = '## ✅ Data Update Processed\n\n'
+            body += `**Approved by:** @${{ github.actor }}\n`
+            body += `**Processed at:** ${new Date().toUTCString()}\n\n`
+
+            if (jsonUrl) {
+              body += `**Source:** Uploaded documents.json\n`
+            } else if (spUrl) {
+              body += `**SharePoint URL noted:** ${spUrl}\n`
+              body += `> ⚠️ SharePoint auto-fetch is not configured. The URL has been logged. To enable automatic SharePoint fetch, follow the SETUP.md guide.\n`
+            } else {
+              body += '> ⚠️ No data file or SharePoint URL was found in the issue body.\n'
+            }
+
+            body += '\n🚀 **The Knowledge Base site is rebuilding now.** Changes will be live in ~2 minutes at:\n'
+            body += 'https://rabindrarizal.github.io/Knowledge-Base/\n'
+
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              workflow_id: 'deploy.yml',
-              ref: 'main',
+              issue_number: context.issue.number,
+              body
             })
-            core.info('Pages deploy triggered')
 
-      - name: Summary
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: 'closed',
+              state_reason: 'completed'
+            })
+
+      - name: Job Summary
         run: |
-          echo "## Data Refresh Complete" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Data Update Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Triggered by: **${{ github.actor }}**" >> $GITHUB_STEP_SUMMARY
-          echo "- Notes: ${{ github.event.inputs.notes || 'none' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Site will be live in ~2 minutes" >> $GITHUB_STEP_SUMMARY
+          echo "- **Issue:** #${{ github.event.issue.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Submitted by:** ${{ github.event.issue.user.login }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Approved by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Site URL:** https://rabindrarizal.github.io/Knowledge-Base/" >> $GITHUB_STEP_SUMMARY
+
